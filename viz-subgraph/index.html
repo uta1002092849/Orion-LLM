@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Freebase Subgraph Viewer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Courier New', monospace;
+      background: #1a1a2e;
+      color: white;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Top controls bar */
+    #controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: rgba(0,0,0,0.6);
+      border-bottom: 1px solid #333;
+      flex-wrap: wrap;
+    }
+    #controls button {
+      padding: 6px 14px;
+      border-radius: 4px;
+      border: 1px solid #555;
+      background: #2a2a4a;
+      color: white;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    #controls button:hover { background: #3a3a6a; }
+    #controls input[type="number"] {
+      width: 120px;
+      padding: 6px 10px;
+      border-radius: 4px;
+      border: 1px solid #555;
+      background: #2a2a4a;
+      color: white;
+      font-family: inherit;
+      font-size: 13px;
+      outline: none;
+    }
+    #controls label { color: #aaa; font-size: 13px; }
+
+    /* Main area: graph + sidebar */
+    #main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    #graph-container {
+      flex: 1;
+      position: relative;
+    }
+    #graph {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Right sidebar */
+    #sidebar {
+      width: 340px;
+      background: rgba(0,0,0,0.5);
+      border-left: 1px solid #333;
+      overflow-y: auto;
+      padding: 16px;
+      font-size: 12px;
+    }
+    #sidebar h3 {
+      color: #42d4f4;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid #222;
+    }
+    .stat-label { color: #888; }
+    .stat-value { color: #fff; }
+
+    #raw-sequence {
+      margin-top: 12px;
+      padding: 10px;
+      background: #111;
+      border-radius: 4px;
+      word-break: break-all;
+      color: #888;
+      font-size: 11px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    #node-list, #edge-list {
+      margin-top: 12px;
+    }
+    .list-item {
+      padding: 4px 6px;
+      margin: 2px 0;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .list-item:hover { background: #333; }
+    .node-item { border-left: 3px solid #42d4f4; }
+    .edge-item { border-left: 3px solid #f58231; }
+
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #555;
+      font-size: 16px;
+    }
+
+    /* Domain color legend in sidebar */
+    .domain-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 4px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <button onclick="prevLine()" title="Previous line">&larr; Prev</button>
+  <label>Line:</label>
+  <input type="number" id="line-input" min="1" value="1" onkeydown="if(event.key==='Enter')goToLine()" />
+  <button onclick="goToLine()">Go</button>
+  <button onclick="nextLine()">Next &rarr;</button>
+  <button onclick="loadRandom()" style="background:#3a2a5a;">Random</button>
+  <span id="total-info" style="color:#555;font-size:12px;margin-left:auto;"></span>
+</div>
+
+<div id="main">
+  <div id="graph-container">
+    <div id="graph"></div>
+    <div id="loading">Loading...</div>
+  </div>
+  <div id="sidebar">
+    <h3>Subgraph Info</h3>
+    <div id="stats"></div>
+    <div id="node-list"></div>
+    <div id="edge-list"></div>
+    <div id="raw-sequence"></div>
+  </div>
+</div>
+
+<script>
+var DOMAIN_COLORS = [
+  "#e6194b","#3cb44b","#4363d8","#f58231","#911eb4",
+  "#42d4f4","#f032e6","#bfef45","#fabed4","#469990",
+  "#dcbeff","#9A6324","#fffac8","#800000","#aaffc3",
+  "#808000","#ffd8b1","#000075","#a9a9a9","#e6beff"
+];
+var domainColorMap = {};
+var domainIndex = 0;
+
+function getDomainColor(domain) {
+  if (!domainColorMap[domain]) {
+    domainColorMap[domain] = DOMAIN_COLORS[domainIndex % DOMAIN_COLORS.length];
+    domainIndex++;
+  }
+  return domainColorMap[domain];
+}
+
+var network = null;
+var currentLine = 1;
+var totalLines = 0;
+
+// Init graph
+var container = document.getElementById('graph');
+var data = { nodes: new vis.DataSet([]), edges: new vis.DataSet([]) };
+var options = {
+  physics: {
+    forceAtlas2Based: {
+      gravitationalConstant: -120,
+      centralGravity: 0.015,
+      springLength: 120,
+      springConstant: 0.05,
+      damping: 0.4
+    },
+    solver: 'forceAtlas2Based',
+    stabilization: { iterations: 100 }
+  },
+  edges: {
+    arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+    color: { color: '#666', highlight: '#f58231' },
+    smooth: { type: 'curvedCW', roundness: 0.2 },
+    font: { size: 10, color: '#999', strokeWidth: 0 }
+  },
+  nodes: {
+    font: { size: 13, color: 'white' },
+    borderWidth: 2,
+    borderWidthSelected: 4
+  },
+  interaction: {
+    hover: true,
+    tooltipDelay: 100
+  }
+};
+network = new vis.Network(container, data, options);
+
+// Freeze after stabilization
+network.on('stabilized', function() {
+  network.setOptions({ physics: { enabled: false } });
+});
+
+// Fetch info
+fetch('/api/info').then(r => r.json()).then(function(info) {
+  totalLines = info.total_lines;
+  document.getElementById('line-input').max = totalLines;
+  document.getElementById('total-info').textContent =
+    totalLines.toLocaleString() + ' sequences | ' +
+    info.node_types + ' node types | ' +
+    info.edge_types + ' edge types';
+  loadLine(1);
+});
+
+function loadLine(num) {
+  currentLine = num;
+  document.getElementById('line-input').value = num;
+  document.getElementById('loading').style.display = 'block';
+
+  fetch('/api/line/' + num).then(r => r.json()).then(renderSubgraph);
+}
+
+function loadRandom() {
+  document.getElementById('loading').style.display = 'block';
+  fetch('/api/random').then(r => r.json()).then(renderSubgraph);
+}
+
+function prevLine() { if (currentLine > 1) loadLine(currentLine - 1); }
+function nextLine() { if (currentLine < totalLines) loadLine(currentLine + 1); }
+function goToLine() {
+  var v = parseInt(document.getElementById('line-input').value);
+  if (v >= 1 && v <= totalLines) loadLine(v);
+}
+
+function renderSubgraph(result) {
+  currentLine = result.line;
+  document.getElementById('line-input').value = result.line;
+  document.getElementById('loading').style.display = 'none';
+
+  // Re-enable physics for new layout
+  network.setOptions({ physics: { enabled: true } });
+
+  // Build vis.js nodes
+  var visNodes = result.nodes.map(function(n) {
+    var color = getDomainColor(n.domain);
+    return {
+      id: n.id,
+      label: n.label,
+      title: n.title,
+      color: {
+        background: n.connected ? color : '#2a2a4a',
+        border: n.connected ? color : '#444',
+        highlight: { background: '#fff', border: color }
+      },
+      size: n.connected ? 18 : 10,
+      font: { color: n.connected ? 'white' : '#666' }
+    };
+  });
+
+  // Build vis.js edges
+  var visEdges = result.edges.map(function(e, i) {
+    return {
+      id: 'e' + i,
+      from: e.from,
+      to: e.to,
+      label: e.label,
+      title: e.title,
+      color: { color: '#666' }
+    };
+  });
+
+  data.nodes.clear();
+  data.edges.clear();
+  data.nodes.add(visNodes);
+  data.edges.add(visEdges);
+
+  network.fit({ animation: { duration: 300 } });
+
+  // Update sidebar
+  var statsHtml =
+    '<div class="stat-row"><span class="stat-label">Line</span><span class="stat-value">' + result.line.toLocaleString() + ' / ' + result.total_lines.toLocaleString() + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Tokens</span><span class="stat-value">' + result.token_count + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Node types</span><span class="stat-value">' + result.node_count + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Edge types</span><span class="stat-value">' + result.edge_count + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Graph edges</span><span class="stat-value">' + result.graph_edge_count + '</span></div>';
+  document.getElementById('stats').innerHTML = statsHtml;
+
+  // Node list
+  var nodeHtml = '<h3 style="margin-top:12px;">Nodes (' + result.nodes.length + ')</h3>';
+  result.nodes.sort(function(a, b) { return a.domain.localeCompare(b.domain); });
+  result.nodes.forEach(function(n) {
+    var color = getDomainColor(n.domain);
+    nodeHtml += '<div class="list-item node-item" onclick="focusNode(' + n.id + ')" style="border-left-color:' + color + ';">'
+      + '<span class="domain-dot" style="background:' + color + ';"></span>'
+      + n.title.split('\\n')[0]
+      + '</div>';
+  });
+  document.getElementById('node-list').innerHTML = nodeHtml;
+
+  // Edge list
+  var edgeHtml = '<h3 style="margin-top:12px;">Edges (' + result.edges.length + ')</h3>';
+  result.edges.forEach(function(e) {
+    edgeHtml += '<div class="list-item edge-item">' + e.title.split('\\n')[0] + '</div>';
+  });
+  document.getElementById('edge-list').innerHTML = edgeHtml;
+
+  // Raw sequence
+  document.getElementById('raw-sequence').innerHTML =
+    '<b style="color:#555;">Raw sequence:</b><br/>' + result.raw;
+}
+
+function focusNode(nodeId) {
+  network.focus(nodeId, { scale: 1.8, animation: { duration: 400, easingFunction: 'easeInOutQuad' } });
+  network.selectNodes([nodeId]);
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', function(e) {
+  if (document.activeElement.tagName === 'INPUT') return;
+  if (e.key === 'ArrowLeft') prevLine();
+  else if (e.key === 'ArrowRight') nextLine();
+  else if (e.key === 'r') loadRandom();
+});
+</script>
+
+</body>
+</html>
