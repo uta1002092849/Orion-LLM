@@ -14,7 +14,7 @@ wheels/
 data/
 
 # Generated visualization
-freebase-schema-viz/freebase-schema.html
+# freebase-schema-viz/freebase-schema.html
 lib/
 
 # macOS
