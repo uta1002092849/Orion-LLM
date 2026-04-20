@@ -15,6 +15,7 @@ data/
 
 # Generated visualization
 viz/freebase-schema.html
+lib/
 
 # macOS
 .DS_Store
